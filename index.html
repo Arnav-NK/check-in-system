@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Festival Check-In Join Explorer</title>
+  <style>
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 20px; max-width: 1200px; margin: 0 auto; color: #333; }
+    h1 { font-size: 1.5rem; }
+    .controls { background: #f0f0f0; padding: 15px; border-radius: 5px; margin-bottom: 20px; display: flex; gap: 10px; }
+    button { padding: 8px 16px; cursor: pointer; border: 1px solid #ccc; background: white; border-radius: 4px; }
+    button:hover { background: #eee; }
+    .tables-container { display: flex; gap: 20px; flex-wrap: wrap; }
+    .panel { flex: 1; min-width: 400px; }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 10px; font-size: 0.9rem; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+    th { background: #fafafa; }
+    input { width: 100%; box-sizing: border-box; padding: 4px; border: 1px solid #ccc; border-radius: 3px; }
+    .error { color: #d32f2f; font-weight: 600; padding: 15px; background: #ffebee; border-radius: 4px; border: 1px solid #ef9a9a; display: none; margin-bottom: 20px; }
+    .results-panel { margin-top: 30px; border-top: 2px solid #eee; padding-top: 20px; }
+    .summary { font-size: 1.1rem; font-weight: bold; margin-bottom: 15px; }
+    .add-btn { background: #e3f2fd; border-color: #bbdefb; color: #1565c0; font-weight: 500; width: 100%; }
+    .add-btn:hover { background: #bbdefb; }
+    .del-btn { background: #ffebee; color: #c62828; border: none; font-weight: bold; padding: 4px 8px; }
+  </style>
+</head>
+<body>
+  <h1>Festival Check-In Join Explorer</h1>
+  
+  <div class="controls">
+    <button onclick="handleCompare()" style="background: #4caf50; color: white; border: none; font-weight: bold;">Compare</button>
+    <button onclick="reset()">Reset to Sample Data</button>
+  </div>
+  
+  <div id="error-box" class="error"></div>
+  
+  <div class="tables-container">
+    <div class="panel">
+      <h2>Registrations</h2>
+      <table id="reg-table">
+        <thead>
+          <tr><th>Registration ID</th><th>Student</th><th>Festival Activity</th><th style="width: 40px;"></th></tr>
+        </thead>
+        <tbody id="reg-tbody"></tbody>
+      </table>
+      <button class="add-btn" onclick="addRegRow()">+ Add Registration</button>
+    </div>
+    
+    <div class="panel">
+      <h2>Check-ins</h2>
+      <table id="check-table">
+        <thead>
+          <tr><th>Registration ID</th><th>Gate</th><th>Check-in Time</th><th style="width: 40px;"></th></tr>
+        </thead>
+        <tbody id="check-tbody"></tbody>
+      </table>
+      <button class="add-btn" onclick="addCheckInRow()">+ Add Check-in</button>
+    </div>
+  </div>
+  
+  <div class="results-panel">
+    <h2>Results</h2>
+    <div id="summary-counts" class="summary"></div>
+    
+    <div style="margin-bottom: 15px;">
+      <label style="font-weight: 500; margin-right: 10px;">Filter Status:</label>
+      <select id="status-filter" onchange="renderResults(window.lastResults, window.lastCounts)">
+        <option value="ALL">All</option>
+        <option value="MATCHED">MATCHED</option>
+        <option value="REGISTERED_ONLY">REGISTERED_ONLY</option>
+        <option value="ORPHAN_CHECK_IN">ORPHAN_CHECK_IN</option>
+      </select>
+    </div>
+
+    <table id="results-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Status</th>
+          <th>Student</th>
+          <th>Festival Activity</th>
+          <th>Gate</th>
+          <th>Check-in Time</th>
+        </tr>
+      </thead>
+      <tbody id="results-tbody"></tbody>
+    </table>
+  </div>
+
+  <script>
+    // --- PURE DATA & BUSINESS LOGIC ---
+
+    const INITIAL_REGISTRATIONS = [
+      { id: 'F101', student: 'Ananya Rao', activity: 'Robo Race' },
+      { id: 'F102', student: 'Dev Menon', activity: 'Music Night' },
+      { id: 'F103', student: 'Isha Patel', activity: 'Open Mic' },
+      { id: 'F104', student: 'Farhan Ali', activity: 'Poster Sprint' }
+    ];
+
+    const INITIAL_CHECKINS = [
+      { id: 'F101', gate: 'North Gate', time: '09:05' },
+      { id: 'F103', gate: 'East Gate', time: '09:12' },
+      { id: 'F999', gate: 'North Gate', time: '09:18' }
+    ];
+
+    function validateTable(rows, tableName) {
+      const errors = [];
+      const seenIds = new Set();
+      
+      for (const row of rows) {
+        const trimmedId = (row.id || '').trim();
+        if (trimmedId === '') {
+          errors.push({ code: 'INVALID_ID', table: tableName, row: JSON.stringify(row) });
+        } else if (seenIds.has(trimmedId)) {
+          errors.push({ code: 'DUPLICATE_KEY', table: tableName, id: trimmedId });
+        }
+        seenIds.add(trimmedId);
+      }
+      return errors;
+    }
+
+    function summarize(results) {
+      const counts = { matched: 0, registeredOnly: 0, orphanCheckIn: 0 };
+      for (const row of results) {
+        if (row.status === 'MATCHED') counts.matched++;
+        else if (row.status === 'REGISTERED_ONLY') counts.registeredOnly++;
+        else if (row.status === 'ORPHAN_CHECK_IN') counts.orphanCheckIn++;
+      }
+      return counts;
+    }
+
+    function compareTables(regRows, checkRows) {
+      const regErrors = validateTable(regRows, 'Registrations');
+      const checkErrors = validateTable(checkRows, 'Check-ins');
+      const allErrors = [...regErrors, ...checkErrors];
+      
+      if (allErrors.length > 0) {
+        return { errors: allErrors, results: [], counts: null };
+      }
+      
+      const results = [];
+      const checkInMap = new Map();
+      
+      for (const row of checkRows) {
+        const trimmedId = row.id.trim();
+        if (!checkInMap.has(trimmedId)) checkInMap.set(trimmedId, []);
+        checkInMap.get(trimmedId).push(row);
+      }
+      
+      const regIds = new Set(regRows.map(r => r.id.trim()));
+      
+      for (const reg of regRows) {
+        const trimmedId = reg.id.trim();
+        const matches = checkInMap.get(trimmedId) || [];
+        
+        if (matches.length === 1) {
+          results.push({
+            id: trimmedId, status: 'MATCHED',
+            student: reg.student, activity: reg.activity,
+            gate: matches[0].gate, time: matches[0].time
+          });
+        } else {
+          results.push({
+            id: trimmedId, status: 'REGISTERED_ONLY',
+            student: reg.student, activity: reg.activity,
+            gate: '—', time: '—'
+          });
+        }
+      }
+      
+      // orphan rows are appended in check-in-table order, not sorted by ID, per rule 5
+      for (const check of checkRows) {
+        const trimmedId = check.id.trim();
+        if (!regIds.has(trimmedId)) {
+          results.push({
+            id: trimmedId, status: 'ORPHAN_CHECK_IN',
+            student: '—', activity: '—',
+            gate: check.gate, time: check.time
+          });
+        }
+      }
+      
+      return { errors: [], results, counts: summarize(results) };
+    }
+
+    // --- DOM RENDERING & WIRING ---
+
+    // I chose a row-edit approach: every cell contains an <input> for direct spreadsheet-like editing.
+    window.lastResults = [];
+    window.lastCounts = null;
+
+    function renderInputTable(tbodyId, data, columns) {
+      const tbody = document.getElementById(tbodyId);
+      tbody.innerHTML = '';
+      data.forEach(row => {
+        const tr = document.createElement('tr');
+        columns.forEach(col => {
+          const td = document.createElement('td');
+          const input = document.createElement('input');
+          input.value = row[col];
+          input.dataset.col = col;
+          td.appendChild(input);
+          tr.appendChild(td);
+        });
+        const actionTd = document.createElement('td');
+        const delBtn = document.createElement('button');
+        delBtn.className = 'del-btn';
+        delBtn.textContent = 'X';
+        delBtn.onclick = () => tr.remove();
+        actionTd.appendChild(delBtn);
+        tr.appendChild(actionTd);
+        tbody.appendChild(tr);
+      });
+    }
+
+    function addRegRow() {
+      const tbody = document.getElementById('reg-tbody');
+      const tr = document.createElement('tr');
+      ['id', 'student', 'activity'].forEach(col => {
+        const td = document.createElement('td');
+        const input = document.createElement('input');
+        input.dataset.col = col;
+        td.appendChild(input);
+        tr.appendChild(td);
+      });
+      const td = document.createElement('td');
+      const btn = document.createElement('button');
+      btn.className = 'del-btn';
+      btn.textContent = 'X';
+      btn.onclick = () => tr.remove();
+      td.appendChild(btn);
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    }
+    
+    function addCheckInRow() {
+      const tbody = document.getElementById('check-tbody');
+      const tr = document.createElement('tr');
+      ['id', 'gate', 'time'].forEach(col => {
+        const td = document.createElement('td');
+        const input = document.createElement('input');
+        input.dataset.col = col;
+        td.appendChild(input);
+        tr.appendChild(td);
+      });
+      const td = document.createElement('td');
+      const btn = document.createElement('button');
+      btn.className = 'del-btn';
+      btn.textContent = 'X';
+      btn.onclick = () => tr.remove();
+      td.appendChild(btn);
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    }
+
+    function readTable(tbodyId, columns) {
+      const tbody = document.getElementById(tbodyId);
+      const rows = Array.from(tbody.querySelectorAll('tr'));
+      return rows.map(tr => {
+        const obj = {};
+        const inputs = tr.querySelectorAll('input');
+        inputs.forEach(inp => { obj[inp.dataset.col] = inp.value; });
+        return obj;
+      });
+    }
+
+    function reset() {
+      const regData = JSON.parse(JSON.stringify(INITIAL_REGISTRATIONS));
+      const checkData = JSON.parse(JSON.stringify(INITIAL_CHECKINS));
+      renderInputTable('reg-tbody', regData, ['id', 'student', 'activity']);
+      renderInputTable('check-tbody', checkData, ['id', 'gate', 'time']);
+      
+      document.getElementById('error-box').style.display = 'none';
+      document.getElementById('error-box').textContent = '';
+      document.getElementById('status-filter').value = 'ALL';
+      
+      window.lastResults = [];
+      window.lastCounts = null;
+      renderResults([], null);
+    }
+
+    function handleCompare() {
+      const regData = readTable('reg-tbody', ['id', 'student', 'activity']);
+      const checkData = readTable('check-tbody', ['id', 'gate', 'time']);
+      
+      const { errors, results, counts } = compareTables(regData, checkData);
+      const errBox = document.getElementById('error-box');
+      
+      if (errors && errors.length > 0) {
+        errBox.style.display = 'block';
+        const e = errors[0]; 
+        if (e.code === 'INVALID_ID') {
+           errBox.textContent = `Validation Error [INVALID_ID]: Empty ID found after trim in table '${e.table}'. Row: ${e.row}`;
+        } else {
+           errBox.textContent = `Validation Error [DUPLICATE_KEY]: Table '${e.table}' contains a duplicate ID '${e.id}'.`;
+        }
+        window.lastResults = [];
+        window.lastCounts = null;
+        renderResults([], null);
+      } else {
+        errBox.style.display = 'none';
+        window.lastResults = results;
+        window.lastCounts = counts;
+        renderResults(results, counts);
+      }
+    }
+
+    function renderResults(results, counts) {
+      const tbody = document.getElementById('results-tbody');
+      tbody.innerHTML = '';
+      
+      const filter = document.getElementById('status-filter').value;
+      const filtered = filter === 'ALL' ? results : results.filter(r => r.status === filter);
+      
+      filtered.forEach(r => {
+        const tr = document.createElement('tr');
+        ['id', 'status', 'student', 'activity', 'gate', 'time'].forEach(col => {
+          const td = document.createElement('td');
+          td.textContent = r[col];
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+      
+      const sumDiv = document.getElementById('summary-counts');
+      if (!counts) {
+        sumDiv.textContent = 'No results. Please Compare.';
+      } else {
+        sumDiv.textContent = `${counts.matched} matched, ${counts.registeredOnly} registered only, ${counts.orphanCheckIn} orphan check-in.`;
+      }
+    }
+
+    window.onload = () => {
+      reset();
+      handleCompare(); // Automatically run comparison on load to fulfill criteria A
+    };
+  </script>
+</body>
+</html>
